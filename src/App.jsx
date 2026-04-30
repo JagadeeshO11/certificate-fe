@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-const apiBaseUrl = "http://localhost:5000";
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "https://certificate-be-ochre.vercel.app/";
 const batchOptions = [10, 25, 50, 100];
 
 export default function App() {
