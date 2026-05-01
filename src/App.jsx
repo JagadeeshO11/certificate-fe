@@ -1,39 +1,52 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || "https://certificate-be-ochre.vercel.app").replace(/\/$/, "");
-const batchOptions = [10, 25, 50, 100];
+const CERT_TYPES = [
+  { id: "winner", label: "Winner" },
+  { id: "runner", label: "Runner Up" },
+  { id: "participant", label: "Participant" }
+];
+
+const backendOptions = [
+  {
+    id: "local",
+    label: "Local Backend",
+    url: (import.meta.env.VITE_API_BASE_URL_LOCAL || "http://localhost:5000").replace(/\/$/, "")
+  },
+  {
+    id: "vercel",
+    label: "Vercel Backend",
+    url: (import.meta.env.VITE_API_BASE_URL_VERCEL || import.meta.env.VITE_API_BASE_URL || "https://certificate-be-ochre.vercel.app").replace(/\/$/, "")
+  }
+];
+const defaultBackendId = import.meta.env.VITE_DEFAULT_BACKEND || "vercel";
 
 async function readApiResponse(response, fallbackMessage) {
   const rawBody = await response.text();
   let data = {};
-
   if (rawBody) {
-    try {
-      data = JSON.parse(rawBody);
-    } catch {
-      if (!response.ok) {
-        throw new Error(`${fallbackMessage} Server returned a non-JSON ${response.status} response.`);
-      }
+    try { data = JSON.parse(rawBody); } catch {
+      if (!response.ok) throw new Error(`${fallbackMessage} Server returned a non-JSON ${response.status} response.`);
     }
   }
-
-  if (!response.ok) {
-    throw new Error(data.message || `${fallbackMessage} Server returned ${response.status}.`);
-  }
-
+  if (!response.ok) throw new Error(data.message || `${fallbackMessage} Server returned ${response.status}.`);
   return data;
 }
 
+const RANGE_OPTIONS = [5, 10, 50, 100];
+const STATUS_ORDER = { pending: 0, sending: 1, failed: 2, invalid_email: 3, blocked: 4, sent: 5 };
+
 export default function App() {
+  const uploadInputRef = useRef(null);
+  const [activeBackendId, setActiveBackendId] = useState(defaultBackendId);
   const [tracks, setTracks] = useState([]);
   const [selectedTrackId, setSelectedTrackId] = useState("");
   const [lists, setLists] = useState([]);
   const [selectedListId, setSelectedListId] = useState("");
+  const [certType, setCertType] = useState("participant");
   const [recipients, setRecipients] = useState([]);
-  const [skippedRows, setSkippedRows] = useState([]);
-  const [sendFailures, setSendFailures] = useState([]);
   const [recipientStatuses, setRecipientStatuses] = useState({});
-  const [batchSize, setBatchSize] = useState("50");
+  const [dataSource, setDataSource] = useState(null);
+  const [uploadFile, setUploadFile] = useState(null);
   const [template, setTemplate] = useState({
     bannerUrl: "",
     title: "Certificate Ready",
@@ -42,197 +55,223 @@ export default function App() {
   });
   const [status, setStatus] = useState("Loading certification tracks...");
   const [isSending, setIsSending] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isDeletingUpload, setIsDeletingUpload] = useState(false);
+  const [deletingEmail, setDeletingEmail] = useState("");
+  const [selectedEmails, setSelectedEmails] = useState(new Set());
+  const [search, setSearch] = useState("");
 
-  const selectedTrack = tracks.find((track) => track.id === selectedTrackId);
-  const selectedList = lists.find((list) => list.id === selectedListId);
-  const doneCount = recipients.filter((recipient) => recipientStatuses[recipient.email]?.status === "sent").length;
-  const pendingCount = Math.max(recipients.length - doneCount, 0);
+  const sortedRecipients = [...recipients].sort((a, b) => {
+    const aOrder = STATUS_ORDER[recipientStatuses[a.email]?.status ?? "pending"] ?? 0;
+    const bOrder = STATUS_ORDER[recipientStatuses[b.email]?.status ?? "pending"] ?? 0;
+    return aOrder - bOrder;
+  });
+
+  const q = search.trim().toLowerCase();
+  const filteredRecipients = q
+    ? sortedRecipients.filter((r) => r.name.toLowerCase().includes(q) || r.email.toLowerCase().includes(q))
+    : sortedRecipients;
+
+  function highlight(text) {
+    if (!q) return text;
+    const idx = text.toLowerCase().indexOf(q);
+    if (idx === -1) return text;
+    return <>{text.slice(0, idx)}<mark className="search-highlight">{text.slice(idx, idx + q.length)}</mark>{text.slice(idx + q.length)}</>;
+  }
+
+  const selectedTrack = tracks.find((t) => t.id === selectedTrackId);
+  const selectedList = lists.find((l) => l.id === selectedListId);
+  const activeBackend = backendOptions.find((b) => b.id === activeBackendId) ?? backendOptions[1];
+  const apiBaseUrl = activeBackend.url;
+  const isBusy = isSending || isUploading || isDeletingUpload;
+  const pendingRecipients = recipients.filter((r) => !recipientStatuses[r.email] || recipientStatuses[r.email]?.status === "pending");
+  const doneCount = recipients.filter((r) => recipientStatuses[r.email]?.status === "sent").length;
+  const allSelected = pendingRecipients.length > 0 && pendingRecipients.every((r) => selectedEmails.has(r.email));
+
+  function resetListState() {
+    setRecipients([]);
+    setRecipientStatuses({});
+    setDataSource(null);
+    setSelectedEmails(new Set());
+  }
+
+  async function loadRecipientsForList(listId, { announce = true } = {}) {
+    const response = await fetch(`${apiBaseUrl}/api/recipients?list=${encodeURIComponent(listId)}`);
+    const data = await readApiResponse(response, "Failed to load recipients.");
+    setRecipients(data.recipients ?? []);
+    setDataSource(data.source ?? null);
+    setSelectedEmails(new Set());
+    setRecipientStatuses(
+      Object.fromEntries((data.recipients ?? []).map((r) => [r.email, r.delivery ?? { status: "pending" }]))
+    );
+    const summary = `Loaded ${data.recipients?.length ?? 0} recipient(s) from ${data.list?.name ?? listId}. Source: ${data.source?.label ?? "Unknown"}.`;
+    if (announce) setStatus(summary);
+    return { data, summary };
+  }
 
   useEffect(() => {
+    resetListState();
+    setTracks([]); setSelectedTrackId(""); setLists([]); setSelectedListId("");
+
     async function loadTracks() {
       try {
+        setStatus(`Connecting to ${activeBackend.label}...`);
         const response = await fetch(`${apiBaseUrl}/api/tracks`);
-        const data = await readApiResponse(response, "Failed to load certification tracks.");
-
+        const data = await readApiResponse(response, "Failed to load tracks.");
         const nextTracks = data.tracks ?? [];
         setTracks(nextTracks);
-
-        if (nextTracks.length > 0) {
-          setSelectedTrackId((current) => current || nextTracks[0].id);
-        } else {
-          setStatus("No certification tracks are configured.");
-        }
-      } catch (error) {
-        setStatus(error.message);
-      }
+        if (nextTracks.length > 0) setSelectedTrackId((c) => c || nextTracks[0].id);
+        else setStatus("No certification tracks configured.");
+      } catch (error) { setStatus(error.message); }
     }
-
     loadTracks();
-  }, []);
+  }, [activeBackendId]);
 
   useEffect(() => {
-    if (!selectedTrackId) {
-      return;
-    }
-
+    if (!selectedTrackId) return;
     async function loadLists() {
       try {
-        setStatus("Loading certification events...");
+        setStatus("Loading events...");
         const response = await fetch(`${apiBaseUrl}/api/lists?track=${encodeURIComponent(selectedTrackId)}`);
-        const data = await readApiResponse(response, "Failed to load certification events.");
-
+        const data = await readApiResponse(response, "Failed to load events.");
         const nextLists = data.lists ?? [];
         setLists(nextLists);
-
         if (nextLists.length > 0) {
-          setSelectedListId((current) => {
-            const currentStillExists = nextLists.some((list) => list.id === current);
-            return currentStillExists ? current : nextLists[0].id;
-          });
+          setSelectedListId((c) => nextLists.some((l) => l.id === c) ? c : nextLists[0].id);
         } else {
-          setSelectedListId("");
-          setRecipients([]);
-          setSkippedRows([]);
-          setSendFailures([]);
-          setRecipientStatuses({});
-          setStatus("No CSV files are available for this certification track.");
+          setSelectedListId(""); resetListState();
+          setStatus("No CSV files available for this track.");
         }
-      } catch (error) {
-        setStatus(error.message);
-      }
+      } catch (error) { setStatus(error.message); }
     }
-
     loadLists();
   }, [selectedTrackId]);
 
   useEffect(() => {
-    if (!selectedListId) {
-      return;
-    }
-
+    if (!selectedListId) return;
     async function loadRecipients() {
       try {
         setStatus("Loading recipients...");
-        const response = await fetch(`${apiBaseUrl}/api/recipients?list=${encodeURIComponent(selectedListId)}`);
-        const data = await readApiResponse(response, "Failed to load recipients.");
-
-        setRecipients(data.recipients ?? []);
-        setSkippedRows(data.skipped ?? []);
-        setSendFailures([]);
-        setRecipientStatuses(
-          Object.fromEntries(
-            (data.recipients ?? []).map((recipient) => [recipient.email, recipient.delivery ?? { status: "pending" }])
-          )
-        );
-        setStatus(
-          `Loaded ${data.recipients.length} valid recipient(s) from ${data.list?.name ?? selectedListId}. ${data.skipped?.length ?? 0} row(s) were skipped.`
-        );
+        await loadRecipientsForList(selectedListId);
       } catch (error) {
-        setRecipients([]);
-        setSkippedRows([]);
-        setSendFailures([]);
-        setRecipientStatuses({});
-        setStatus(error.message);
+        resetListState(); setStatus(error.message);
       }
     }
-
     loadRecipients();
   }, [selectedListId]);
 
-  async function handleSendEmails() {
-    setIsSending(true);
-    setStatus("Sending emails...");
-    setSendFailures([]);
-    setRecipientStatuses((currentStatuses) => {
-      const nextStatuses = { ...currentStatuses };
-      const limit = batchSize === "all" ? recipients.length : Number(batchSize);
+  function toggleSelectAll() {
+    const allPendingSelected = pendingRecipients.every((r) => selectedEmails.has(r.email));
+    if (allPendingSelected) setSelectedEmails(new Set());
+    else setSelectedEmails(new Set(pendingRecipients.map((r) => r.email)));
+  }
 
-      recipients.slice(0, limit).forEach((recipient) => {
-        nextStatuses[recipient.email] = { status: "sending" };
-      });
+  function selectRange(n) {
+    setSelectedEmails(new Set(pendingRecipients.slice(0, n).map((r) => r.email)));
+  }
 
-      return nextStatuses;
+  function toggleEmail(email) {
+    setSelectedEmails((prev) => {
+      const next = new Set(prev);
+      next.has(email) ? next.delete(email) : next.add(email);
+      return next;
     });
+  }
 
+  async function handleUpload() {
+    if (!uploadFile || !selectedListId) return;
+    setIsUploading(true); setStatus("Uploading CSV...");
     try {
+      const response = await fetch(
+        `${apiBaseUrl}/api/lists/${encodeURIComponent(selectedListId)}/upload?filename=${encodeURIComponent(uploadFile.name)}`,
+        { method: "POST", headers: { "Content-Type": uploadFile.type || "text/csv" }, body: uploadFile }
+      );
+      const data = await readApiResponse(response, "Upload failed.");
+      const { summary } = await loadRecipientsForList(selectedListId, { announce: false });
+      setStatus(`${data.message} ${summary}`);
+      setUploadFile(null);
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+    } catch (error) { setStatus(error.message); }
+    finally { setIsUploading(false); }
+  }
+
+  async function handleDeleteUpload() {
+    if (!selectedListId) return;
+    setIsDeletingUpload(true); setStatus("Deleting uploaded file...");
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/lists/${encodeURIComponent(selectedListId)}/upload`, { method: "DELETE" });
+      const data = await readApiResponse(response, "Delete failed.");
+      const { summary } = await loadRecipientsForList(selectedListId, { announce: false });
+      setStatus(`${data.message} ${summary}`);
+    } catch (error) { setStatus(error.message); }
+    finally { setIsDeletingUpload(false); }
+  }
+
+  async function handleRefresh() {
+    if (!selectedListId) return;
+    setStatus("Refreshing...");
+    try {
+      const { summary } = await loadRecipientsForList(selectedListId, { announce: false });
+      setStatus(summary);
+    } catch (error) { setStatus(error.message); }
+  }
+
+  async function handleDeleteRecipient(email) {
+    if (!selectedListId || !email) return;
+    setDeletingEmail(email); setStatus(`Deleting ${email}...`);
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/recipients`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ listId: selectedListId, email })
+      });
+      const data = await readApiResponse(response, "Delete failed.");
+      const { summary } = await loadRecipientsForList(selectedListId, { announce: false });
+      setStatus(`${data.message} ${summary}`);
+    } catch (error) { setStatus(error.message); }
+    finally { setDeletingEmail(""); }
+  }
+
+  async function handleSend(emailsToSend) {
+    if (!emailsToSend.length) return;
+    setIsSending(true); setStatus(`Sending ${emailsToSend.length} email(s)...`);
+    setRecipientStatuses((prev) => {
+      const next = { ...prev };
+      emailsToSend.forEach((email) => { next[email] = { status: "sending" }; });
+      return next;
+    });
+    try {
+      const certLabel = CERT_TYPES.find((c) => c.id === certType)?.label ?? "Participant";
       const response = await fetch(`${apiBaseUrl}/api/send`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           listId: selectedListId,
-          batchSize: batchSize === "all" ? recipients.length : Number(batchSize),
-          template
+          emails: emailsToSend,
+          template: { ...template, title: `${certLabel} Certificate Ready` }
         })
       });
-      const data = await readApiResponse(response, "Failed to send emails.");
-
+      const data = await readApiResponse(response, "Send failed.");
       setStatus(data.message);
-      setSkippedRows(data.skipped ?? []);
-      setSendFailures(data.failed ?? []);
-      setRecipientStatuses((currentStatuses) => {
-        const nextStatuses = { ...currentStatuses };
-
-        (data.results ?? []).forEach((result) => {
-          nextStatuses[result.email] = result.delivery;
-        });
-
-        return nextStatuses;
+      setDataSource(data.source ?? dataSource);
+      setRecipientStatuses((prev) => {
+        const next = { ...prev };
+        (data.results ?? []).forEach((r) => { next[r.email] = r.delivery; });
+        return next;
       });
-    } catch (error) {
-      setStatus(error.message);
-    } finally {
-      setIsSending(false);
-    }
+      setSelectedEmails(new Set());
+    } catch (error) { setStatus(error.message); }
+    finally { setIsSending(false); }
   }
 
   function getRecipientStatus(email) {
     const entry = recipientStatuses[email];
-    if (!entry) {
-      return { label: "Pending", className: "result-badge pending", reason: "" };
-    }
-
-    if (entry.status === "sent") {
-      return { label: "Done", className: "result-badge success", reason: "" };
-    }
-
-    if (entry.status === "invalid_email") {
-      return { label: "Wrong Email", className: "result-badge error", reason: entry.reason ?? "" };
-    }
-
-    if (entry.status === "blocked") {
-      return { label: "Blocked", className: "result-badge blocked", reason: entry.reason ?? "" };
-    }
-
-    if (entry.status === "failed") {
-      return { label: "Failed", className: "result-badge error", reason: entry.reason ?? "" };
-    }
-
+    if (!entry) return { label: "Pending", className: "result-badge pending", reason: "" };
+    if (entry.status === "sent") return { label: "Done", className: "result-badge success", reason: "" };
+    if (entry.status === "invalid_email") return { label: "Wrong Email", className: "result-badge error", reason: entry.reason ?? "" };
+    if (entry.status === "blocked") return { label: "Blocked", className: "result-badge blocked", reason: entry.reason ?? "" };
+    if (entry.status === "failed") return { label: "Failed", className: "result-badge error", reason: entry.reason ?? "" };
     return { label: "Sending", className: "result-badge sending", reason: "" };
-  }
-
-  function updateTemplateField(key, value) {
-    setTemplate((current) => ({
-      ...current,
-      [key]: value
-    }));
-  }
-
-  function getTrackDescription(trackId) {
-    if (trackId === "demo") {
-      return "Recipients confirmation and demo sending flow.";
-    }
-
-    if (trackId === "tech") {
-      return "Web Development, Hackathon, and Crak The Code.";
-    }
-
-    if (trackId === "nontech") {
-      return "Presentation, Circutron, and Tecchquiz.";
-    }
-
-    return "Choose a certification track to start sending.";
   }
 
   return (
@@ -241,7 +280,7 @@ export default function App() {
         <header className="dashboard-topbar">
           <div>
             <p className="eyebrow">Codeathon 2K26</p>
-            <h1>Modern Certificate Dashboard</h1>
+            <h1>Certificate Dashboard</h1>
           </div>
           <div className="topbar-status">
             <span className="status-dot" />
@@ -253,22 +292,23 @@ export default function App() {
           <article className="overview-card feature">
             <span className="overview-label">Track</span>
             <strong>{selectedTrack?.name ?? "Not selected"}</strong>
-            <p>{getTrackDescription(selectedTrackId)}</p>
           </article>
           <article className="overview-card">
             <span className="overview-label">Event</span>
-            <strong>{selectedList?.name ?? "No CSV"}</strong>
-            <p>{selectedList?.id ?? "Waiting for selection"}</p>
+            <strong>{selectedList?.name ?? "—"}</strong>
+          </article>
+          <article className="overview-card">
+            <span className="overview-label">Certificate Type</span>
+            <strong>{CERT_TYPES.find((c) => c.id === certType)?.label ?? "—"}</strong>
           </article>
           <article className="overview-card">
             <span className="overview-label">Recipients</span>
             <strong>{recipients.length}</strong>
-            <p>{pendingCount} pending</p>
-          </article>
-          <article className="overview-card">
-            <span className="overview-label">Delivered</span>
-            <strong>{doneCount}</strong>
-            <p>{sendFailures.length} failed</p>
+            <div className="overview-tally">
+              <span className="tally-done">✅ {doneCount} done</span>
+              <span className="tally-pending">⏳ {pendingRecipients.length} pending</span>
+              <span className="tally-selected">☑️ {selectedEmails.size} selected</span>
+            </div>
           </article>
         </section>
 
@@ -276,196 +316,173 @@ export default function App() {
           <aside className="panel control-panel">
             <div className="panel-head">
               <h2>Controls</h2>
-              <p>Compact setup for quick mail runs.</p>
             </div>
 
             <div className="compact-form">
               <label className="field">
-                <span>Certificate Track</span>
-                <select
-                  value={selectedTrackId}
-                  onChange={(event) => setSelectedTrackId(event.target.value)}
-                  disabled={isSending || tracks.length === 0}
-                >
-                  {tracks.map((track) => (
-                    <option key={track.id} value={track.id}>
-                      {track.name}
-                    </option>
-                  ))}
+                <span>Backend</span>
+                <select value={activeBackendId} onChange={(e) => setActiveBackendId(e.target.value)} disabled={isBusy}>
+                  {backendOptions.map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}
+                </select>
+              </label>
+
+              <label className="field">
+                <span>Track</span>
+                <select value={selectedTrackId} onChange={(e) => setSelectedTrackId(e.target.value)} disabled={isBusy || !tracks.length}>
+                  {tracks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </label>
+
+              <label className="field">
+                <span>Certificate Type</span>
+                <select value={certType} onChange={(e) => setCertType(e.target.value)} disabled={isBusy}>
+                  {CERT_TYPES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
                 </select>
               </label>
 
               <label className="field">
                 <span>Event</span>
-                <select
-                  value={selectedListId}
-                  onChange={(event) => setSelectedListId(event.target.value)}
-                  disabled={isSending || lists.length === 0}
-                >
-                  {lists.map((list) => (
-                    <option key={list.id} value={list.id}>
-                      {list.name}
-                    </option>
-                  ))}
+                <select value={selectedListId} onChange={(e) => setSelectedListId(e.target.value)} disabled={isBusy || !lists.length}>
+                  {lists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
                 </select>
               </label>
 
-              <label className="field">
-                <span>Batch Size</span>
-                <select value={batchSize} onChange={(event) => setBatchSize(event.target.value)} disabled={isSending}>
-                  {batchOptions.map((option) => (
-                    <option key={option} value={String(option)}>
-                      {option}
-                    </option>
-                  ))}
-                  <option value="all">All</option>
-                </select>
-              </label>
+              <div className="field field-wide">
+                <span>Upload CSV</span>
+                <input ref={uploadInputRef} type="file" accept=".csv" onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)} disabled={isBusy} />
+                {uploadFile && <span className="field-subnote">📄 {uploadFile.name}</span>}
+                <div className="upload-actions">
+                  <button className="send-button secondary-button" onClick={handleUpload} disabled={isBusy || !uploadFile || !selectedListId}>
+                    {isUploading ? "Uploading..." : "Upload"}
+                  </button>
+                  <button className="send-button secondary-button" onClick={handleRefresh} disabled={isBusy || !selectedListId}>
+                    Refresh
+                  </button>
+                </div>
+              </div>
+
+              {dataSource && (
+                <div className="field field-wide uploaded-file-card">
+                  <span>Active Source</span>
+                  <div className="uploaded-file-info">
+                    <span className="uploaded-file-icon">📁</span>
+                    <div>
+                      <strong>{dataSource.filename ?? dataSource.pathname}</strong>
+                      <span className="field-subnote">{dataSource.label}{dataSource.uploadedAt ? ` · ${new Date(dataSource.uploadedAt).toLocaleString()}` : ""}</span>
+                    </div>
+                  </div>
+                  {dataSource.type === "mongodb" && (
+                    <button className="send-button danger-button" onClick={handleDeleteUpload} disabled={isBusy}>
+                      {isDeletingUpload ? "Deleting..." : "Delete Uploaded File"}
+                    </button>
+                  )}
+                </div>
+              )}
 
               <label className="field field-wide">
                 <span>Banner URL</span>
-                <input
-                  type="url"
-                  placeholder="https://res.cloudinary.com/.../banner.png"
-                  value={template.bannerUrl}
-                  onChange={(event) => updateTemplateField("bannerUrl", event.target.value)}
-                  disabled={isSending}
-                />
+                <input type="url" placeholder="https://..." value={template.bannerUrl} onChange={(e) => setTemplate((p) => ({ ...p, bannerUrl: e.target.value }))} disabled={isBusy} />
               </label>
 
               <label className="field">
                 <span>Mail Title</span>
-                <input
-                  type="text"
-                  value={template.title}
-                  onChange={(event) => updateTemplateField("title", event.target.value)}
-                  disabled={isSending}
-                />
+                <input type="text" value={template.title} onChange={(e) => setTemplate((p) => ({ ...p, title: e.target.value }))} disabled={isBusy} />
               </label>
 
               <label className="field">
                 <span>Button Text</span>
-                <input
-                  type="text"
-                  value={template.viewButtonText}
-                  onChange={(event) => updateTemplateField("viewButtonText", event.target.value)}
-                  disabled={isSending}
-                />
+                <input type="text" value={template.viewButtonText} onChange={(e) => setTemplate((p) => ({ ...p, viewButtonText: e.target.value }))} disabled={isBusy} />
               </label>
 
               <label className="field field-wide">
                 <span>Letter</span>
-                <textarea
-                  rows="4"
-                  value={template.letter}
-                  onChange={(event) => updateTemplateField("letter", event.target.value)}
-                  disabled={isSending}
-                />
+                <textarea rows="3" value={template.letter} onChange={(e) => setTemplate((p) => ({ ...p, letter: e.target.value }))} disabled={isBusy} />
               </label>
             </div>
 
             <div className="panel-actions">
-              <button className="send-button" onClick={handleSendEmails} disabled={isSending || recipients.length === 0}>
-                {isSending ? "Sending..." : "Send Emails"}
+              <button
+                className="send-button"
+                onClick={() => handleSend([...selectedEmails])}
+                disabled={isBusy || selectedEmails.size === 0}
+              >
+                {isSending ? "Sending..." : `Send Selected (${selectedEmails.size})`}
               </button>
-              <div className="mini-meta">
-                <span>{selectedTrack?.events?.length ?? 0} events</span>
-                <span>{skippedRows.length} skipped</span>
-              </div>
             </div>
           </aside>
 
           <section className="panel preview-panel">
-            <div className="panel-head panel-head-inline">
-              <div>
-                <h2>Recipient Preview</h2>
-                <p>Live data from the selected event CSV.</p>
-              </div>
-              <div className="panel-chip-row">
-                <span className="panel-chip">{selectedTrack?.id ?? "track"}</span>
-                <span className="panel-chip">{selectedList?.name ?? "event"}</span>
+            <div className="recipients-head">
+              <div className="recipients-head-top">
+                <div>
+                  <h2>Recipients</h2>
+                  <p>{selectedList?.name ?? "No event selected"} · <span className={`source-tag source-${dataSource?.type ?? "none"}`}>{dataSource?.label ?? "No source"}</span></p>
+                </div>
+                <div className="panel-chip-row">
+                  <span className="panel-chip">{selectedTrack?.id ?? "track"}</span>
+                  <span className="panel-chip">{CERT_TYPES.find((c) => c.id === certType)?.label ?? "type"}</span>
+                </div>
               </div>
             </div>
 
+            <div className="table-toolbar">
+              <span className="toolbar-label">Quick select pending:</span>
+              {RANGE_OPTIONS.map((n) => (
+                <button key={n} className="range-btn" onClick={() => selectRange(n)} disabled={isBusy || pendingRecipients.length === 0}>
+                  {n}
+                </button>
+              ))}
+              <button className="range-btn range-btn-clear" onClick={() => setSelectedEmails(new Set())} disabled={isBusy || selectedEmails.size === 0}>
+                Clear
+              </button>
+              <span className="toolbar-count">{selectedEmails.size} selected · {pendingRecipients.length} pending</span>
+            </div>
+
             <div className="table-wrap compact-table">
+              <div className="table-search-wrap">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                <input
+                  className="table-search-input"
+                  placeholder="Search by name or email..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+                {search && <button className="search-clear-btn" onClick={() => setSearch("")}>✕</button>}
+                {q && <span className="toolbar-count">{filteredRecipients.length} match{filteredRecipients.length !== 1 ? "es" : ""}</span>}
+              </div>
               <table>
                 <thead>
                   <tr>
+                    <th><input type="checkbox" checked={allSelected} onChange={toggleSelectAll} disabled={isBusy || !recipients.length} /></th>
                     <th>Name</th>
                     <th>Email</th>
                     <th>Certificate</th>
                     <th>Status</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {recipients.length > 0 ? (
-                    recipients.map((recipient) => {
-                      const badge = getRecipientStatus(recipient.email);
-
-                      return (
-                        <tr key={recipient.email}>
-                          <td>{recipient.name}</td>
-                          <td>{recipient.email}</td>
-                          <td>
-                            <a href={recipient.certificates} target="_blank" rel="noreferrer">
-                              Open
-                            </a>
-                          </td>
-                          <td>
-                            <span className={badge.className} title={badge.reason}>
-                              {badge.label}
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  ) : (
-                    <tr>
-                      <td colSpan="4" className="empty-state">
-                        No recipients yet. Add rows to the selected CSV.
-                      </td>
-                    </tr>
+                  {filteredRecipients.length > 0 ? filteredRecipients.map((r) => {
+                    const badge = getRecipientStatus(r.email);
+                    return (
+                      <tr key={r.email} className={selectedEmails.has(r.email) ? "row-selected" : ""}>
+                        <td><input type="checkbox" checked={selectedEmails.has(r.email)} onChange={() => toggleEmail(r.email)} disabled={isBusy} /></td>
+                        <td className="td-name">{highlight(r.name)}</td>
+                        <td className="td-email">{highlight(r.email)}</td>
+                        <td><a href={r.certificates} target="_blank" rel="noreferrer">Open ↗</a></td>
+                        <td><span className={badge.className} title={badge.reason}>{badge.label}</span></td>
+                        <td>
+                          <button className="table-action-button" onClick={() => handleDeleteRecipient(r.email)} disabled={isBusy || deletingEmail === r.email}>
+                            {deletingEmail === r.email ? "..." : "Delete"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  }) : (
+                    <tr><td colSpan="6" className="empty-state">{q ? `No results for "${search}"` : "No recipients. Select an event or upload a CSV."}</td></tr>
                   )}
                 </tbody>
               </table>
-            </div>
-
-            <div className="signal-grid">
-              <article className="signal-card">
-                <h3>Skipped Rows</h3>
-                <div className="signal-list">
-                  {skippedRows.length > 0 ? (
-                    skippedRows.map((item) => (
-                      <div key={`${item.row}-${item.reason}`} className="signal-item">
-                        <strong>Row {item.row}</strong>
-                        <span>{item.reason}</span>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="signal-item muted">
-                      <span>No skipped rows.</span>
-                    </div>
-                  )}
-                </div>
-              </article>
-
-              <article className="signal-card">
-                <h3>Send Failures</h3>
-                <div className="signal-list">
-                  {sendFailures.length > 0 ? (
-                    sendFailures.map((item) => (
-                      <div key={`${item.email}-${item.reason}`} className="signal-item">
-                        <strong>{item.email}</strong>
-                        <span>{item.reason}</span>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="signal-item muted">
-                      <span>No send failures.</span>
-                    </div>
-                  )}
-                </div>
-              </article>
             </div>
           </section>
         </section>
