@@ -182,8 +182,9 @@ export default function App() {
     if (!uploadFile || !selectedListId) return;
     setIsUploading(true); setStatus("Uploading CSV...");
     try {
+      const cleanName = uploadFile.name.replace(/\.csv$/i, "");
       const response = await fetch(
-        `${apiBaseUrl}/api/lists/${encodeURIComponent(selectedListId)}/upload?filename=${encodeURIComponent(uploadFile.name)}`,
+        `${apiBaseUrl}/api/lists/${encodeURIComponent(selectedListId)}/upload?filename=${encodeURIComponent(cleanName)}`,
         { method: "POST", headers: { "Content-Type": "text/csv" }, body: uploadFile }
       );
       const data = await readApiResponse(response, "Upload failed.");
