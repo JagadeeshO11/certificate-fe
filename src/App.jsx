@@ -3,6 +3,27 @@ import { useEffect, useState } from "react";
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || "https://certificate-be-ochre.vercel.app").replace(/\/$/, "");
 const batchOptions = [10, 25, 50, 100];
 
+async function readApiResponse(response, fallbackMessage) {
+  const rawBody = await response.text();
+  let data = {};
+
+  if (rawBody) {
+    try {
+      data = JSON.parse(rawBody);
+    } catch {
+      if (!response.ok) {
+        throw new Error(`${fallbackMessage} Server returned a non-JSON ${response.status} response.`);
+      }
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(data.message || `${fallbackMessage} Server returned ${response.status}.`);
+  }
+
+  return data;
+}
+
 export default function App() {
   const [tracks, setTracks] = useState([]);
   const [selectedTrackId, setSelectedTrackId] = useState("");
@@ -31,11 +52,7 @@ export default function App() {
     async function loadTracks() {
       try {
         const response = await fetch(`${apiBaseUrl}/api/tracks`);
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.message || "Failed to load certification tracks.");
-        }
+        const data = await readApiResponse(response, "Failed to load certification tracks.");
 
         const nextTracks = data.tracks ?? [];
         setTracks(nextTracks);
@@ -62,11 +79,7 @@ export default function App() {
       try {
         setStatus("Loading certification events...");
         const response = await fetch(`${apiBaseUrl}/api/lists?track=${encodeURIComponent(selectedTrackId)}`);
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.message || "Failed to load certification events.");
-        }
+        const data = await readApiResponse(response, "Failed to load certification events.");
 
         const nextLists = data.lists ?? [];
         setLists(nextLists);
@@ -101,11 +114,7 @@ export default function App() {
       try {
         setStatus("Loading recipients...");
         const response = await fetch(`${apiBaseUrl}/api/recipients?list=${encodeURIComponent(selectedListId)}`);
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.message || "Failed to load recipients.");
-        }
+        const data = await readApiResponse(response, "Failed to load recipients.");
 
         setRecipients(data.recipients ?? []);
         setSkippedRows(data.skipped ?? []);
@@ -157,11 +166,7 @@ export default function App() {
           template
         })
       });
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || "Failed to send emails.");
-      }
+      const data = await readApiResponse(response, "Failed to send emails.");
 
       setStatus(data.message);
       setSkippedRows(data.skipped ?? []);
