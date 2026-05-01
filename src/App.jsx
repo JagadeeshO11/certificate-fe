@@ -184,7 +184,7 @@ export default function App() {
     try {
       const response = await fetch(
         `${apiBaseUrl}/api/lists/${encodeURIComponent(selectedListId)}/upload?filename=${encodeURIComponent(uploadFile.name)}`,
-        { method: "POST", headers: { "Content-Type": uploadFile.type || "text/csv" }, body: uploadFile }
+        { method: "POST", headers: { "Content-Type": "text/csv" }, body: uploadFile }
       );
       const data = await readApiResponse(response, "Upload failed.");
       const { summary } = await loadRecipientsForList(selectedListId, { announce: false });
