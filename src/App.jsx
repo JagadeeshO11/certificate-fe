@@ -563,7 +563,7 @@ export default function App() {
             </div>
 
             <div className="modal-fields">
-              {[["name", "👤 Name"], ["email", "✉️ Email"], ["certificate", "🔗 Certificate Link"]].map(([key, label]) => (
+              {[["name", "👤 Name / Participants"], ["email", "✉️ Email"], ["certificate", "🔗 Certificate Link"]].map(([key, label]) => (
                 <div key={key} className="modal-field-row">
                   <label className="modal-field-label">{label}</label>
                   <select
