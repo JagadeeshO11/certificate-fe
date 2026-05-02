@@ -36,6 +36,7 @@ const RANGE_OPTIONS = [5, 10, 50, 100];
 const STATUS_ORDER = { pending: 0, sending: 1, failed: 2, invalid_email: 3, blocked: 4, sent: 5 };
 
 export default function App() {
+  const bannerInputRef = useRef(null);
   const uploadInputRef = useRef(null);
   const [activeBackendId, setActiveBackendId] = useState(defaultBackendId);
   const [tracks, setTracks] = useState([]);
@@ -60,6 +61,10 @@ export default function App() {
   const [deletingEmail, setDeletingEmail] = useState("");
   const [selectedEmails, setSelectedEmails] = useState(new Set());
   const [search, setSearch] = useState("");
+  const [colMap, setColMap] = useState({ name: "", email: "", certificate: "" });
+  const [csvColumns, setCsvColumns] = useState([]);
+  const [showColMapper, setShowColMapper] = useState(false);
+  const [pendingListId, setPendingListId] = useState("");
 
   const sortedRecipients = [...recipients].sort((a, b) => {
     const aOrder = STATUS_ORDER[recipientStatuses[a.email]?.status ?? "pending"] ?? 0;
@@ -96,7 +101,11 @@ export default function App() {
   }
 
   async function loadRecipientsForList(listId, { announce = true } = {}) {
-    const response = await fetch(`${apiBaseUrl}/api/recipients?list=${encodeURIComponent(listId)}`);
+    const params = new URLSearchParams({ list: listId });
+    if (colMap.name) params.set("colName", colMap.name);
+    if (colMap.email) params.set("colEmail", colMap.email);
+    if (colMap.certificate) params.set("colCert", colMap.certificate);
+    const response = await fetch(`${apiBaseUrl}/api/recipients?${params}`);
     const data = await readApiResponse(response, "Failed to load recipients.");
     setRecipients(data.recipients ?? []);
     setDataSource(data.source ?? null);
@@ -107,6 +116,32 @@ export default function App() {
     const summary = `Loaded ${data.recipients?.length ?? 0} recipient(s) from ${data.list?.name ?? listId}. Source: ${data.source?.label ?? "Unknown"}.`;
     if (announce) setStatus(summary);
     return { data, summary };
+  }
+
+  async function loadColumns(listId) {
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/lists/${encodeURIComponent(listId)}/columns`);
+      const data = await readApiResponse(res, "Failed to load columns.");
+      const cols = data.columns ?? [];
+      setCsvColumns(cols);
+      setColMap({ name: "", email: "", certificate: "" });
+      setPendingListId(listId);
+      setShowColMapper(true);
+    } catch { setCsvColumns([]); }
+  }
+
+  async function applyColMap() {
+    if (!colMap.name || !colMap.email || !colMap.certificate) {
+      setStatus("Please map all three columns before loading.");
+      return;
+    }
+    setShowColMapper(false);
+    setStatus("Loading recipients...");
+    try {
+      await loadRecipientsForList(pendingListId);
+    } catch (error) {
+      resetListState(); setStatus(error.message);
+    }
   }
 
   useEffect(() => {
@@ -149,15 +184,15 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedListId) return;
-    async function loadRecipients() {
+    async function initList() {
       try {
-        setStatus("Loading recipients...");
-        await loadRecipientsForList(selectedListId);
+        setStatus("Reading CSV columns...");
+        await loadColumns(selectedListId);
       } catch (error) {
         resetListState(); setStatus(error.message);
       }
     }
-    loadRecipients();
+    initList();
   }, [selectedListId]);
 
   function toggleSelectAll() {
@@ -176,6 +211,25 @@ export default function App() {
       next.has(email) ? next.delete(email) : next.add(email);
       return next;
     });
+  }
+
+  function handleBannerFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      const canvas = document.createElement("canvas");
+      const MAX = 800;
+      const ratio = Math.min(MAX / img.width, MAX / img.height, 1);
+      canvas.width = Math.round(img.width * ratio);
+      canvas.height = Math.round(img.height * ratio);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+      setTemplate((p) => ({ ...p, bannerUrl: dataUrl }));
+    };
+    img.src = objectUrl;
   }
 
   async function handleUpload() {
@@ -249,6 +303,9 @@ export default function App() {
         body: JSON.stringify({
           listId: selectedListId,
           emails: emailsToSend,
+          colName: colMap.name || undefined,
+          colEmail: colMap.email || undefined,
+          colCert: colMap.certificate || undefined,
           template: { ...template, title: `${certLabel} Certificate Ready` }
         })
       });
@@ -380,10 +437,16 @@ export default function App() {
                 </div>
               )}
 
-              <label className="field field-wide">
-                <span>Banner URL</span>
-                <input type="url" placeholder="https://..." value={template.bannerUrl} onChange={(e) => setTemplate((p) => ({ ...p, bannerUrl: e.target.value }))} disabled={isBusy} />
-              </label>
+              <div className="field field-wide">
+                <span>Banner Image</span>
+                <input ref={bannerInputRef} type="file" accept="image/*" onChange={handleBannerFile} disabled={isBusy} />
+                {template.bannerUrl && (
+                  <div className="banner-preview-wrap">
+                    <img src={template.bannerUrl} alt="Banner preview" className="banner-preview" />
+                    <button className="search-clear-btn" onClick={() => { setTemplate((p) => ({ ...p, bannerUrl: "" })); if (bannerInputRef.current) bannerInputRef.current.value = ""; }}>✕ Remove</button>
+                  </div>
+                )}
+              </div>
 
               <label className="field">
                 <span>Mail Title</span>
@@ -488,6 +551,41 @@ export default function App() {
           </section>
         </section>
       </section>
+
+      {showColMapper && (
+        <div className="modal-overlay">
+          <div className="modal">
+            <h2 className="modal-title">Map CSV Columns</h2>
+            <p className="modal-sub">Your file has these columns. Tell us which one is which.</p>
+
+            <div className="modal-cols-preview">
+              {csvColumns.map((c) => <span key={c} className="col-chip">{c}</span>)}
+            </div>
+
+            <div className="modal-fields">
+              {[["name", "👤 Name"], ["email", "✉️ Email"], ["certificate", "🔗 Certificate Link"]].map(([key, label]) => (
+                <div key={key} className="modal-field-row">
+                  <label className="modal-field-label">{label}</label>
+                  <select
+                    className="modal-select"
+                    value={colMap[key]}
+                    onChange={(e) => setColMap((p) => ({ ...p, [key]: e.target.value }))}
+                  >
+                    <option value="">— select column —</option>
+                    {csvColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+              ))}
+            </div>
+
+            <div className="modal-actions">
+              <button className="send-button" onClick={applyColMap} disabled={!colMap.name || !colMap.email || !colMap.certificate}>
+                Load Recipients
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
