@@ -123,11 +123,24 @@ export default function App() {
       const res = await fetch(`${apiBaseUrl}/api/lists/${encodeURIComponent(listId)}/columns`);
       const data = await readApiResponse(res, "Failed to load columns.");
       const cols = data.columns ?? [];
+      if (cols.length === 0) {
+        setStatus("No columns found in CSV. Check the file format.");
+        return;
+      }
       setCsvColumns(cols);
-      setColMap({ name: "", email: "", certificate: "" });
+      // pre-select obvious matches
+      const guess = (patterns) => cols.find((c) => patterns.some((p) => c.toLowerCase().includes(p))) ?? "";
+      setColMap({
+        name: guess(["participant", "name", "student", "full"]),
+        email: guess(["email", "mail"]),
+        certificate: guess(["cert", "link", "url", "drive"])
+      });
       setPendingListId(listId);
       setShowColMapper(true);
-    } catch { setCsvColumns([]); }
+    } catch (error) {
+      setStatus(error.message);
+      setCsvColumns([]);
+    }
   }
 
   async function applyColMap() {
