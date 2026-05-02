@@ -1,11 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 
-const CERT_TYPES = [
-  { id: "winner", label: "Winner" },
-  { id: "runner", label: "Runner Up" },
-  { id: "participant", label: "Participant" }
-];
-
 const backendOptions = [
   {
     id: "local",
@@ -43,7 +37,6 @@ export default function App() {
   const [selectedTrackId, setSelectedTrackId] = useState("");
   const [lists, setLists] = useState([]);
   const [selectedListId, setSelectedListId] = useState("");
-  const [certType, setCertType] = useState("participant");
   const [recipients, setRecipients] = useState([]);
   const [recipientStatuses, setRecipientStatuses] = useState({});
   const [dataSource, setDataSource] = useState(null);
@@ -58,13 +51,8 @@ export default function App() {
   const [isSending, setIsSending] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isDeletingUpload, setIsDeletingUpload] = useState(false);
-  const [deletingEmail, setDeletingEmail] = useState("");
   const [selectedEmails, setSelectedEmails] = useState(new Set());
   const [search, setSearch] = useState("");
-  const [colMap, setColMap] = useState({ name: "", email: "", certificate: "" });
-  const [csvColumns, setCsvColumns] = useState([]);
-  const [showColMapper, setShowColMapper] = useState(false);
-  const [pendingListId, setPendingListId] = useState("");
 
   const sortedRecipients = [...recipients].sort((a, b) => {
     const aOrder = STATUS_ORDER[recipientStatuses[a.email]?.status ?? "pending"] ?? 0;
@@ -84,7 +72,6 @@ export default function App() {
     return <>{text.slice(0, idx)}<mark className="search-highlight">{text.slice(idx, idx + q.length)}</mark>{text.slice(idx + q.length)}</>;
   }
 
-  const selectedTrack = tracks.find((t) => t.id === selectedTrackId);
   const selectedList = lists.find((l) => l.id === selectedListId);
   const activeBackend = backendOptions.find((b) => b.id === activeBackendId) ?? backendOptions[1];
   const apiBaseUrl = activeBackend.url;
@@ -101,11 +88,7 @@ export default function App() {
   }
 
   async function loadRecipientsForList(listId, { announce = true } = {}) {
-    const params = new URLSearchParams({ list: listId });
-    if (colMap.name) params.set("colName", colMap.name);
-    if (colMap.email) params.set("colEmail", colMap.email);
-    if (colMap.certificate) params.set("colCert", colMap.certificate);
-    const response = await fetch(`${apiBaseUrl}/api/recipients?${params}`);
+    const response = await fetch(`${apiBaseUrl}/api/recipients?list=${encodeURIComponent(listId)}`);
     const data = await readApiResponse(response, "Failed to load recipients.");
     setRecipients(data.recipients ?? []);
     setDataSource(data.source ?? null);
@@ -118,49 +101,9 @@ export default function App() {
     return { data, summary };
   }
 
-  async function loadColumns(listId) {
-    try {
-      const res = await fetch(`${apiBaseUrl}/api/lists/${encodeURIComponent(listId)}/columns`);
-      const data = await readApiResponse(res, "Failed to load columns.");
-      const cols = data.columns ?? [];
-      if (cols.length === 0) {
-        setStatus("No columns found in CSV. Check the file format.");
-        return;
-      }
-      setCsvColumns(cols);
-      // pre-select obvious matches
-      const guess = (patterns) => cols.find((c) => patterns.some((p) => c.toLowerCase().includes(p))) ?? "";
-      setColMap({
-        name: guess(["participant", "name", "student", "full"]),
-        email: guess(["email", "mail"]),
-        certificate: guess(["cert", "link", "url", "drive"])
-      });
-      setPendingListId(listId);
-      setShowColMapper(true);
-    } catch (error) {
-      setStatus(error.message);
-      setCsvColumns([]);
-    }
-  }
-
-  async function applyColMap() {
-    if (!colMap.name || !colMap.email || !colMap.certificate) {
-      setStatus("Please map all three columns before loading.");
-      return;
-    }
-    setShowColMapper(false);
-    setStatus("Loading recipients...");
-    try {
-      await loadRecipientsForList(pendingListId);
-    } catch (error) {
-      resetListState(); setStatus(error.message);
-    }
-  }
-
   useEffect(() => {
     resetListState();
     setTracks([]); setSelectedTrackId(""); setLists([]); setSelectedListId("");
-
     async function loadTracks() {
       try {
         setStatus(`Connecting to ${activeBackend.label}...`);
@@ -199,8 +142,8 @@ export default function App() {
     if (!selectedListId) return;
     async function initList() {
       try {
-        setStatus("Reading CSV columns...");
-        await loadColumns(selectedListId);
+        setStatus("Loading recipients...");
+        await loadRecipientsForList(selectedListId);
       } catch (error) {
         resetListState(); setStatus(error.message);
       }
@@ -239,8 +182,7 @@ export default function App() {
       canvas.width = Math.round(img.width * ratio);
       canvas.height = Math.round(img.height * ratio);
       canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
-      setTemplate((p) => ({ ...p, bannerUrl: dataUrl }));
+      setTemplate((p) => ({ ...p, bannerUrl: canvas.toDataURL("image/jpeg", 0.7) }));
     };
     img.src = objectUrl;
   }
@@ -284,22 +226,6 @@ export default function App() {
     } catch (error) { setStatus(error.message); }
   }
 
-  async function handleDeleteRecipient(email) {
-    if (!selectedListId || !email) return;
-    setDeletingEmail(email); setStatus(`Deleting ${email}...`);
-    try {
-      const response = await fetch(`${apiBaseUrl}/api/recipients`, {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ listId: selectedListId, email })
-      });
-      const data = await readApiResponse(response, "Delete failed.");
-      const { summary } = await loadRecipientsForList(selectedListId, { announce: false });
-      setStatus(`${data.message} ${summary}`);
-    } catch (error) { setStatus(error.message); }
-    finally { setDeletingEmail(""); }
-  }
-
   async function handleSend(emailsToSend) {
     if (!emailsToSend.length) return;
     setIsSending(true); setStatus(`Sending ${emailsToSend.length} email(s)...`);
@@ -309,18 +235,10 @@ export default function App() {
       return next;
     });
     try {
-      const certLabel = CERT_TYPES.find((c) => c.id === certType)?.label ?? "Participant";
       const response = await fetch(`${apiBaseUrl}/api/send`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          listId: selectedListId,
-          emails: emailsToSend,
-          colName: colMap.name || undefined,
-          colEmail: colMap.email || undefined,
-          colCert: colMap.certificate || undefined,
-          template: { ...template, title: `${certLabel} Certificate Ready` }
-        })
+        body: JSON.stringify({ listId: selectedListId, emails: emailsToSend, template })
       });
       const data = await readApiResponse(response, "Send failed.");
       setStatus(data.message);
@@ -361,25 +279,23 @@ export default function App() {
 
         <section className="overview-strip">
           <article className="overview-card feature">
-            <span className="overview-label">Track</span>
-            <strong>{selectedTrack?.name ?? "Not selected"}</strong>
-          </article>
-          <article className="overview-card">
             <span className="overview-label">Event</span>
-            <strong>{selectedList?.name ?? "—"}</strong>
+            <strong>{selectedList?.name ?? "Not selected"}</strong>
           </article>
           <article className="overview-card">
-            <span className="overview-label">Certificate Type</span>
-            <strong>{CERT_TYPES.find((c) => c.id === certType)?.label ?? "—"}</strong>
+            <span className="overview-label">Source</span>
+            <strong><span className={`source-tag source-${dataSource?.type ?? "none"}`}>{dataSource?.label ?? "No source"}</span></strong>
+            <p>{dataSource?.filename ?? "—"}</p>
           </article>
           <article className="overview-card">
             <span className="overview-label">Recipients</span>
             <strong>{recipients.length}</strong>
-            <div className="overview-tally">
-              <span className="tally-done">✅ {doneCount} done</span>
-              <span className="tally-pending">⏳ {pendingRecipients.length} pending</span>
-              <span className="tally-selected">☑️ {selectedEmails.size} selected</span>
-            </div>
+            <p>✅ {doneCount} done · ⏳ {pendingRecipients.length} pending</p>
+          </article>
+          <article className="overview-card">
+            <span className="overview-label">Selected</span>
+            <strong>{selectedEmails.size}</strong>
+            <p>☑️ ready to send</p>
           </article>
         </section>
 
@@ -464,11 +380,7 @@ export default function App() {
             </div>
 
             <div className="panel-actions">
-              <button
-                className="send-button"
-                onClick={() => handleSend([...selectedEmails])}
-                disabled={isBusy || selectedEmails.size === 0}
-              >
+              <button className="send-button" onClick={() => handleSend([...selectedEmails])} disabled={isBusy || selectedEmails.size === 0}>
                 {isSending ? "Sending..." : `Send Selected (${selectedEmails.size})`}
               </button>
             </div>
@@ -480,10 +392,6 @@ export default function App() {
                 <div>
                   <h2>Recipients</h2>
                   <p>{selectedList?.name ?? "No event selected"} · <span className={`source-tag source-${dataSource?.type ?? "none"}`}>{dataSource?.label ?? "No source"}</span></p>
-                </div>
-                <div className="panel-chip-row">
-                  <span className="panel-chip">{selectedTrack?.id ?? "track"}</span>
-                  <span className="panel-chip">{CERT_TYPES.find((c) => c.id === certType)?.label ?? "type"}</span>
                 </div>
               </div>
             </div>
@@ -504,12 +412,7 @@ export default function App() {
             <div className="table-wrap compact-table">
               <div className="table-search-wrap">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                <input
-                  className="table-search-input"
-                  placeholder="Search by name or email..."
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                />
+                <input className="table-search-input" placeholder="Search by name or email..." value={search} onChange={(e) => setSearch(e.target.value)} />
                 {search && <button className="search-clear-btn" onClick={() => setSearch("")}>✕</button>}
                 {q && <span className="toolbar-count">{filteredRecipients.length} match{filteredRecipients.length !== 1 ? "es" : ""}</span>}
               </div>
@@ -544,41 +447,6 @@ export default function App() {
           </section>
         </section>
       </section>
-
-      {showColMapper && (
-        <div className="modal-overlay">
-          <div className="modal">
-            <h2 className="modal-title">Map CSV Columns</h2>
-            <p className="modal-sub">Your file has these columns. Tell us which one is which.</p>
-
-            <div className="modal-cols-preview">
-              {csvColumns.map((c) => <span key={c} className="col-chip">{c}</span>)}
-            </div>
-
-            <div className="modal-fields">
-              {[["name", "👤 Name / Participants"], ["email", "✉️ Email"], ["certificate", "🔗 Certificate Link"]].map(([key, label]) => (
-                <div key={key} className="modal-field-row">
-                  <label className="modal-field-label">{label}</label>
-                  <select
-                    className="modal-select"
-                    value={colMap[key]}
-                    onChange={(e) => setColMap((p) => ({ ...p, [key]: e.target.value }))}
-                  >
-                    <option value="">— select column —</option>
-                    {csvColumns.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                </div>
-              ))}
-            </div>
-
-            <div className="modal-actions">
-              <button className="send-button" onClick={applyColMap} disabled={!colMap.name || !colMap.email || !colMap.certificate}>
-                Load Recipients
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </main>
   );
 }
