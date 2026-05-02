@@ -535,7 +535,6 @@ export default function App() {
                     <th>Email</th>
                     <th>Certificate</th>
                     <th>Status</th>
-                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -548,15 +547,10 @@ export default function App() {
                         <td className="td-email">{highlight(r.email)}</td>
                         <td><a href={r.certificates} target="_blank" rel="noreferrer">Open ↗</a></td>
                         <td><span className={badge.className} title={badge.reason}>{badge.label}</span></td>
-                        <td>
-                          <button className="table-action-button" onClick={() => handleDeleteRecipient(r.email)} disabled={isBusy || deletingEmail === r.email}>
-                            {deletingEmail === r.email ? "..." : "Delete"}
-                          </button>
-                        </td>
                       </tr>
                     );
                   }) : (
-                    <tr><td colSpan="6" className="empty-state">{q ? `No results for "${search}"` : "No recipients. Select an event or upload a CSV."}</td></tr>
+                    <tr><td colSpan="5" className="empty-state">{q ? `No results for "${search}"` : "No recipients. Select an event or upload a CSV."}</td></tr>
                   )}
                 </tbody>
               </table>
