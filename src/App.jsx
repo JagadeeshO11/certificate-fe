@@ -398,20 +398,6 @@ export default function App() {
               </label>
 
               <label className="field">
-                <span>Track</span>
-                <select value={selectedTrackId} onChange={(e) => setSelectedTrackId(e.target.value)} disabled={isBusy || !tracks.length}>
-                  {tracks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                </select>
-              </label>
-
-              <label className="field">
-                <span>Certificate Type</span>
-                <select value={certType} onChange={(e) => setCertType(e.target.value)} disabled={isBusy}>
-                  {CERT_TYPES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
-                </select>
-              </label>
-
-              <label className="field">
                 <span>Event</span>
                 <select value={selectedListId} onChange={(e) => setSelectedListId(e.target.value)} disabled={isBusy || !lists.length}>
                   {lists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
